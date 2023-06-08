@@ -1,4 +1,3 @@
-```
 ## GCN Network Optimization
 
 This project aims to optimize a Graph Convolutional Network (GCN) model using Optuna for predicting confirmed COVID-19 cases in different regions. The model utilizes additional features along with the historical data to improve the prediction accuracy.
