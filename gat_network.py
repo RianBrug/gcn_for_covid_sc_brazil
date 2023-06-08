@@ -17,6 +17,7 @@ from sklearn.model_selection import KFold
 import optuna
 import sqlite3
 import optuna.visualization as vis
+from torch_geometric.nn import GATConv
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.multiprocessing as mp
 
@@ -107,18 +108,21 @@ def data_to_graph(df, window, train_indices, val_indices):
 def objective(trial):
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5)
     lr = trial.suggest_float("lr", 1e-4, 1e-1, log=True)
-    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [16, 32, 64, 128, 256, 512])
-    num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21, 24])
+    # num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [16, 32, 64, 128, 256, 512, 1024])
+    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [1, 2, 4, 6, 8, 10, 12, 14, 16])
+    # num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21, 24])
+    num_layers = trial.suggest_categorical("num_layers", [1, 2, 3, 4, 5, 6, 7, 8, 9])
     weight_decay = trial.suggest_float("weight_decay", 1e-10, 1e-3)  # L2 regularization
+    num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8, 16])  # Number of attention heads
 
     class Net(torch.nn.Module):
-        def __init__(self, num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate):
+        def __init__(self, num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate, num_heads):
             super(Net, self).__init__()
             self.layers = torch.nn.ModuleList()
-            self.layers.append(GCNConv(num_original_features + num_additional_features, num_hidden_channels))
+            self.layers.append(GATConv(num_original_features + num_additional_features, num_hidden_channels, heads=num_heads))
             for _ in range(num_layers - 2): # -2 to account for the first and last layers
-                self.layers.append(GCNConv(num_hidden_channels, num_hidden_channels))
-            self.layers.append(GCNConv(num_hidden_channels, num_original_features))  # output size matches num_original_features
+                self.layers.append(GATConv(num_hidden_channels * num_heads, num_hidden_channels, heads=num_heads))
+            self.layers.append(GATConv(num_hidden_channels * num_heads, num_original_features))  # output size matches num_original_features
             self.dropout_rate = dropout_rate
 
         def forward(self, data):
@@ -130,9 +134,9 @@ def objective(trial):
             x = self.layers[-1](x, edge_index)  # Don't apply relu or dropout to the last layer's outputs
             return x
 
-
     results = []
     total_epochs = 100
+    
 
     for fold, (train_index, val_index) in enumerate(kf.split(np.arange(window, df.shape[0] - window))):
         data = data_to_graph(df, window, train_index, val_index)
@@ -140,16 +144,14 @@ def objective(trial):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         num_original_features = window  # original size
         num_additional_features = 3  # new additional features
-        model = Net(num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate).to(device)
+        model = Net(num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate, num_heads).to(device)
         data = data.to(device)
         optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Added weight decay for L2 regularization
-        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=33)  # Added a learning rate scheduler
+        scheduler = ReduceLROnPlateau(optimizer, 'min')  # Added a learning rate scheduler
         criterion = MSELoss()
 
         model.train()
         fold_losses = []
-
-        model.train()
         for epoch in range(total_epochs):
             optimizer.zero_grad()
             out = model(data)
@@ -169,7 +171,6 @@ def objective(trial):
         # Handle pruning based on the intermediate value
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
-
 
         model.eval()
         pred = model(data)
@@ -195,9 +196,10 @@ def objective(trial):
     return avg_mae  # Optuna will minimize this value
 
 # Start Optuna study
+n_trails = 1000
 pruner = optuna.pruners.MedianPruner()
-study = optuna.create_study(study_name="gcn_network", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
-study.optimize(objective, n_trials=100)  # Number of iterations. Increase it for better results, but it will take more time.
+study = optuna.create_study(study_name="GAT_network_smaller", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
+study.optimize(objective, n_trials=n_trails)  # Number of iterations. Increase it for better results, but it will take more time.
 vis.plot_optimization_history(study)
 vis.plot_intermediate_values(study)
 vis.plot_parallel_coordinate(study)

@@ -1,2 +1,5 @@
-/assets/*
+/assets/boavista_*
 tcc_speech.py
+.DS_Store
+__pycache__/
+.ipynb_checkpoints
