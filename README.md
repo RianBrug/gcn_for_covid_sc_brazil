@@ -26,18 +26,12 @@ To run this project, please ensure that you have the following dependencies inst
 - scikit-learn
 - torch-geometric
 
-You can install the required packages by running the following command:
-
-```bash
-pip install -r requirements.txt
-```
-
 ## Usage
 
 1. Setup a virtual environment using pyenv (optional but recommended):
     
 ```bash
-pyenv virtualenv [python-version] gcn
+pyenv virtualenv 3.9.4 gcn
 pyenv local gcn
 ```
 
