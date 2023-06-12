@@ -1,5 +1,4 @@
 import json
-import joblib
 import sklearn
 import torch
 import networkx as nx
@@ -7,7 +6,7 @@ import pandas as pd
 import torch_geometric
 from torch_geometric.utils import from_networkx
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, mean_squared_error, r2_score
-from torch.nn import MSELoss
+from torch.nn import MSELoss, L1Loss
 import torch.nn.functional as F
 from torch.optim import Adam
 from utils import Utils
@@ -19,7 +18,7 @@ import optuna.visualization as vis
 from torch_geometric.nn import GATConv
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.multiprocessing as mp
-from joblib import Parallel, delayed
+from sklearn.preprocessing import StandardScaler
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -30,7 +29,6 @@ print("Pandas version: ", pd.__version__)
 print("Numpy version: ", np.__version__)
 print("Sklearn version: ", sklearn.__version__)
 print("Torch Geometric version: ", torch_geometric.__version__)
-print("Joblib version: ", joblib.__version__)
 print("-------------------------------------")
 
 # Enable parallel processing
@@ -49,7 +47,16 @@ df.sort_values(by=['collect_date'], inplace=True)
 df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
 
 window = 15
+total_epochs = 100
+trials_until_start_pruning = 150
+n_trails = 1000
+n_jobs = 4 # Number of parallel jobs
+num_original_features = window  # original size
+num_additional_features = 3  # new additional features
+patience_learning_scheduler = 33
+
 tscv = TimeSeriesSplit(n_splits=5)
+scaler = StandardScaler()
 
 class Net(torch.nn.Module):
     def __init__(self, num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate, num_heads):
@@ -137,20 +144,17 @@ def objective(trial):
     # num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8, 16])  # Number of attention heads
     num_heads = trial.suggest_categorical("num_heads", [1, 2, 3, 4, 5, 6, 7, 8, 9])  # Number of attention heads
     results = []
-    total_epochs = 100
     
 
     for fold, (train_index, val_index) in enumerate(tscv.split(np.arange(window, df.shape[0] - window))):
         data = data_to_graph(df, window, train_index, val_index)
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        num_original_features = window  # original size
-        num_additional_features = 3  # new additional features
         model = Net(num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate, num_heads).to(device)
         data = data.to(device)
         optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Added weight decay for L2 regularization
-        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=33)  # Added a learning rate scheduler
-        criterion = MSELoss()
+        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=patience_learning_scheduler)  # Added a learning rate scheduler
+        criterion = L1Loss()
 
         model.train()
         fold_losses = []
@@ -175,7 +179,7 @@ def objective(trial):
             
         avg_fold_loss = sum(fold_losses) / len(fold_losses)
 
-        if trial.number > 250:
+        if trial.number > trials_until_start_pruning:
             # Pass the average fold loss to the pruner
             unique_epoch = fold * total_epochs + epoch
             trial.report(avg_fold_loss, unique_epoch)
@@ -223,8 +227,6 @@ def objective(trial):
     return avg_mae  # Optuna will minimize this value
 
 # Start Optuna study
-n_trails = 1000
-n_jobs = 4 # Number of parallel jobs
 pruner = optuna.pruners.MedianPruner()
 study = optuna.create_study(study_name="GAT_network_timeseriessplit", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
 study.optimize(objective, n_trials=n_trails, n_jobs=n_jobs, show_progress_bar=True)
