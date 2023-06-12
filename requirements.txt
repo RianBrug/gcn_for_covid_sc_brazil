@@ -99,10 +99,8 @@ tensorboard==2.13.0
 tensorboard-data-server==0.7.0
 tensorflow==2.13.0rc1
 tensorflow-estimator==2.13.0rc0
-tensorflow-macos==2.13.0rc1
 termcolor==2.3.0
 tf-nightly==2.14.0.dev20230502
-tf-nightly-macos==2.14.0.dev20230502
 Theano==1.0.5
 threadpoolctl==3.1.0
 toml==0.10.2

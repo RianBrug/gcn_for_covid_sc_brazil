@@ -62,12 +62,12 @@ To launch the dashboard:
 1. Start the Optuna dashboard server with your optimization database:
 
     ```bash
-    optuna dashboard --storage sqlite:///example.db
+    optuna dashboard --storage sqlite:///gcn
     ```
 
     Replace "example.db" with the name of your SQLite database file that was used for storing the optimization results.
 
-2. Open your web browser and navigate to the displayed URL (usually `localhost:8008`). The Optuna Dashboard will appear, displaying a variety of interactive plots about your optimization process. 
+2. Open your web browser and navigate to the displayed URL (usually `localhost:8080`). The Optuna Dashboard will appear, displaying a variety of interactive plots about your optimization process. 
 
 Please note that the Optuna Dashboard is read-only and does not support modifying the database. Always remember to save and backup your database.
 

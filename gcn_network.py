@@ -1,4 +1,5 @@
 import json
+import joblib
 import sklearn
 import torch
 import networkx as nx
@@ -18,6 +19,7 @@ import optuna.visualization as vis
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.multiprocessing as mp
 from sklearn.model_selection import TimeSeriesSplit
+from joblib import Parallel, delayed
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -28,6 +30,7 @@ print("Pandas version: ", pd.__version__)
 print("Numpy version: ", np.__version__)
 print("Sklearn version: ", sklearn.__version__)
 print("Torch Geometric version: ", torch_geometric.__version__)
+print("Joblib version: ", joblib.__version__)
 print("-------------------------------------")
 
 # Enable parallel processing
@@ -216,9 +219,10 @@ def objective(trial):
 
 # Start Optuna study
 n_trails = 1000
+n_jobs = 4 # Number of parallel jobs
 pruner = optuna.pruners.MedianPruner()
 study = optuna.create_study(study_name="gcn_network_timeseriessplit", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
-study.optimize(objective, n_trials=n_trails)
+study.optimize(objective, n_trials=n_trails, n_jobs=n_jobs, show_progress_bar=True)
 vis.plot_optimization_history(study)
 vis.plot_intermediate_values(study)
 vis.plot_parallel_coordinate(study)
