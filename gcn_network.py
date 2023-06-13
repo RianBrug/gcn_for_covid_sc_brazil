@@ -19,6 +19,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.multiprocessing as mp
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -47,14 +48,15 @@ df.sort_values(by=['collect_date'], inplace=True)
 df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
 
 window = 15
-indow = 15
 total_epochs = 100
 trials_until_start_pruning = 150
-n_trails = 1000
-n_jobs = 4 # Number of parallel jobs
+n_trails = 500
+n_jobs = 2 # Number of parallel jobs
 num_original_features = window  # original size
 num_additional_features = 3  # new additional features
 patience_learning_scheduler = 33
+true_values = []
+predictions = []
 
 tscv = TimeSeriesSplit(n_splits=5)
 
@@ -138,8 +140,8 @@ def objective(trial):
     num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [32, 64, 96, 128, 256])
     num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21, 24])
     weight_decay = trial.suggest_float("weight_decay", 1e-10, 1e-3)  # L2 regularization
-
     results = []
+
     for fold, (train_index, val_index) in enumerate(tscv.split(np.arange(window, df.shape[0] - window))):
         data = data_to_graph(df, window, train_index, val_index)
 
@@ -170,6 +172,8 @@ def objective(trial):
                 pred = model(data)
                 val_loss = criterion(out[data.val_mask], data.y[data.val_mask])
                 val_losses.append(val_loss.item())
+                true_values.append(data.y[data.val_mask].cpu().detach().numpy())
+                predictions.append(pred[data.val_mask].cpu().detach().numpy())
 
             scheduler.step(val_loss)
 
@@ -233,6 +237,21 @@ vis.plot_slice(study)
 vis.plot_param_importances(study)
 vis.plot_edf(study)
 vis.plot_contour(study)
+
+# Convert to NumPy arrays for easier manipulation
+true_values = np.concatenate(true_values)
+predictions = np.concatenate(predictions)
+
+# Plot the true values
+plt.plot(df['collect_date'][:len(true_values)], true_values, label='True values')
+
+# Plot the predicted values
+plt.plot(df['collect_date'][:len(predictions)], predictions, label='Predictions')
+
+plt.xlabel('Time')
+plt.ylabel('Confirmed cases')
+plt.legend()
+plt.show()
 
 best_trial = study.best_trial
 for trial in study.trials:
