@@ -20,6 +20,7 @@ import torch.multiprocessing as mp
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
+from optuna.pruners import SuccessiveHalvingPruner
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -50,11 +51,11 @@ df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
 window = 15
 total_epochs = 100
 trials_until_start_pruning = 150
-n_trails = 500
+n_trails = 4
 n_jobs = 2 # Number of parallel jobs
 num_original_features = window  # original size
 num_additional_features = 3  # new additional features
-patience_learning_scheduler = 33
+patience_learning_scheduler = 15
 true_values = []
 predictions = []
 
@@ -135,16 +136,23 @@ def data_to_graph(df, window, train_indices, val_indices):
     return data
 
 def objective(trial):
+    global best_trial_params	
+    global best_mae
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5)
     lr = trial.suggest_float("lr", 1e-4, 1e-1,log=True)
-    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [32, 64, 96, 128, 256])
-    num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21, 24])
+    # num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [32, 64, 96, 128, 256])
+    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [64])
+    # num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21, 24])
+    num_layers = trial.suggest_categorical("num_layers", [9])
     weight_decay = trial.suggest_float("weight_decay", 1e-10, 1e-3)  # L2 regularization
     results = []
+    true_values = []	
+    predictions = []
 
     for fold, (train_index, val_index) in enumerate(tscv.split(np.arange(window, df.shape[0] - window))):
+        trial.set_user_attr("train_index", train_index.tolist())	
+        trial.set_user_attr("val_index", val_index.tolist())
         data = data_to_graph(df, window, train_index, val_index)
-
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         num_original_features = window  # original size
         num_additional_features = 3  # new additional features
@@ -153,11 +161,9 @@ def objective(trial):
         optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Added weight decay for L2 regularization
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=patience_learning_scheduler)  # Added a learning rate scheduler
         criterion = L1Loss()
-
-        fold_losses = []
-        train_losses = []
-        val_losses = []
         model.train()
+        fold_losses = []  # Average loss for each epoch within this fold	
+        val_losses = []  # Validation loss for each epoch within this fold
         for epoch in range(total_epochs):
             optimizer.zero_grad()
             out = model(data)
@@ -166,14 +172,13 @@ def objective(trial):
             optimizer.step()
             model.eval()
             fold_losses.append(loss.item())
-            train_losses.append(loss.item())
 
             with torch.no_grad():
                 pred = model(data)
                 val_loss = criterion(out[data.val_mask], data.y[data.val_mask])
                 val_losses.append(val_loss.item())
-                true_values.append(data.y[data.val_mask].cpu().detach().numpy())
-                predictions.append(pred[data.val_mask].cpu().detach().numpy())
+                true_values.append(data.y[data.val_mask].cpu().detach().numpy().tolist())	
+                predictions.append(pred[data.val_mask].cpu().detach().numpy().tolist())
 
             scheduler.step(val_loss)
 
@@ -204,7 +209,7 @@ def objective(trial):
         r2 = r2_score(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
         mdape = Utils.MDAPE(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
 
-        results.append((mae, mape, mse, rmse, r2, mdape, train_losses[-33:], val_losses[-33:]))
+        results.append((mae, mape, mse, rmse, r2, mdape, val_losses[-33:]))
 
     avg_mae = np.mean([res[0] for res in results])
     avg_mape = np.mean([res[1] for res in results])
@@ -212,8 +217,7 @@ def objective(trial):
     avg_rmse = np.mean([res[3] for res in results])
     avg_r2 = np.mean([res[4] for res in results])
     avg_mdape = np.mean([res[5] for res in results])
-    avg_train_losses = np.mean([res[6] for res in results])
-    avg_val_losses = np.mean([res[7] for res in results])
+    avg_val_losses = np.mean([res[6] for res in results])
 
     trial.set_user_attr("avg_mae", float(avg_mae))
     trial.set_user_attr("avg_mape", float(avg_mape))
@@ -221,14 +225,13 @@ def objective(trial):
     trial.set_user_attr("avg_rmse", float(avg_rmse))
     trial.set_user_attr("avg_r2", float(avg_r2))
     trial.set_user_attr("avg_mdape", float(avg_mdape))
-    trial.set_user_attr('avg_train_losses', float(avg_train_losses))
     trial.set_user_attr("avg_val_losses", float(avg_val_losses))
 
     return avg_mae  # Optuna will minimize this value
 
 # Start Optuna study
-pruner = optuna.pruners.MedianPruner()
-study = optuna.create_study(study_name="gcn_network_timeseriessplit", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
+pruner = SuccessiveHalvingPruner()
+study = optuna.create_study(study_name="gcn_9layers_64channels", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
 study.optimize(objective, n_trials=n_trails, n_jobs=n_jobs, show_progress_bar=True)
 vis.plot_optimization_history(study)
 vis.plot_intermediate_values(study)
@@ -238,33 +241,17 @@ vis.plot_param_importances(study)
 vis.plot_edf(study)
 vis.plot_contour(study)
 
-# Convert to NumPy arrays for easier manipulation
-true_values = np.concatenate(true_values)
-predictions = np.concatenate(predictions)
-
-# Plot the true values
-plt.plot(df['collect_date'][:len(true_values)], true_values, label='True values')
-
-# Plot the predicted values
-plt.plot(df['collect_date'][:len(predictions)], predictions, label='Predictions')
-
-plt.xlabel('Time')
-plt.ylabel('Confirmed cases')
-plt.legend()
+# After the study	
+best_trial = study.best_trial	
+best_true_values = best_trial.user_attrs["true_values"]	
+best_predictions = best_trial.user_attrs["predictions"]	
+# Convert to NumPy arrays for easier manipulation	
+best_true_values = np.array([item for sublist in best_true_values for item in sublist])	
+best_predictions = np.array([item for sublist in best_predictions for item in sublist])	
+# Now, true_values and predictions contain data only for the best model's last run, so they are the same size and can be plotted against df['collect_date']	
+plt.plot(df['collect_date'][:len(best_true_values)], best_true_values, label='True values')	
+plt.plot(df['collect_date'][:len(best_predictions)], best_predictions, label='Predictions')	
+plt.xlabel('Time')	
+plt.ylabel('Confirmed Cases')	
+plt.legend()	
 plt.show()
-
-best_trial = study.best_trial
-for trial in study.trials:
-    print("Trial", trial.number)
-    print("Best Trial, Value", study.best_trial.value)
-    print("MAE", trial.value)
-    print("MAPE", trial.user_attrs["avg_mape"])
-    print("MSE", trial.user_attrs["avg_mse"])
-    print("RMSE", trial.user_attrs["avg_rmse"])
-    print("R2", trial.user_attrs["avg_r2"])
-    print("MDAPE", trial.user_attrs["avg_mdape"])
-    print("AVG Train losses", trial.user_attrs["avg_train_losses"])
-    print("AVG Val losses", trial.user_attrs["avg_val_losses"])
-    print("Parameters", trial.params)
-    print("Intermediate values", trial.intermediate_values)
-    print("User attributes", trial.user_attrs)
