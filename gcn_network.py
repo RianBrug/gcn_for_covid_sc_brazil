@@ -21,6 +21,10 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 from optuna.pruners import SuccessiveHalvingPruner
+from sqlalchemy import create_engine
+
+engine = create_engine('postgresql://rcvb:@localhost:5432/gnns_db')
+database_url = 'postgresql://rcvb:@localhost:5432/gnns_db'
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -51,8 +55,8 @@ df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
 window = 15
 total_epochs = 100
 trials_until_start_pruning = 150
-n_trails = 4
-n_jobs = 2 # Number of parallel jobs
+n_trails = 20
+n_jobs = 6 # Number of parallel jobs
 num_original_features = window  # original size
 num_additional_features = 3  # new additional features
 patience_learning_scheduler = 15
@@ -226,12 +230,14 @@ def objective(trial):
     trial.set_user_attr("avg_r2", float(avg_r2))
     trial.set_user_attr("avg_mdape", float(avg_mdape))
     trial.set_user_attr("avg_val_losses", float(avg_val_losses))
+    trial.set_user_attr("true_values", true_values)
+    trial.set_user_attr("predictions", predictions)
 
     return avg_mae  # Optuna will minimize this value
 
 # Start Optuna study
 pruner = SuccessiveHalvingPruner()
-study = optuna.create_study(study_name="gcn_9layers_64channels", storage="sqlite:///gcn", load_if_exists=True, direction="minimize", pruner=pruner)
+study = optuna.create_study(study_name="gcn_9layers_64channels", storage=database_url, load_if_exists=True, direction="minimize", pruner=pruner)
 study.optimize(objective, n_trials=n_trails, n_jobs=n_jobs, show_progress_bar=True)
 vis.plot_optimization_history(study)
 vis.plot_intermediate_values(study)
