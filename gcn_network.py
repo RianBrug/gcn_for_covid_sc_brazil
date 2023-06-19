@@ -9,7 +9,8 @@ from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error,
 from torch_geometric.nn import GCNConv
 from torch.nn import L1Loss, MSELoss
 import torch.nn.functional as F
-from torch.optim import Adam
+from torch.optim import Adam, RMSprop
+
 from utils import Utils
 import numpy as np
 import optuna
@@ -23,8 +24,9 @@ import matplotlib.pyplot as plt
 from optuna.pruners import SuccessiveHalvingPruner
 from sqlalchemy import create_engine
 
-engine = create_engine('postgresql://rcvb:@localhost:5432/gnns_db')
-database_url = 'postgresql://rcvb:@localhost:5432/gnns_db'
+# engine = create_engine('postgresql://rcvb:@localhost:5432/gnns_db')
+# database_url = 'postgresql://rcvb:@localhost:5432/gnns_db'
+database_url = 'sqlite:///gcn_latest'
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -53,17 +55,17 @@ df.sort_values(by=['collect_date'], inplace=True)
 df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
 
 window = 15
-total_epochs = 100
+total_epochs = 160
 trials_until_start_pruning = 150
-n_trails = 20
-n_jobs = 6 # Number of parallel jobs
+n_trails = 5000
+n_jobs = 5 # Number of parallel jobs
 num_original_features = window  # original size
 num_additional_features = 3  # new additional features
-patience_learning_scheduler = 15
+patience_learning_scheduler = 130
 true_values = []
 predictions = []
 
-tscv = TimeSeriesSplit(n_splits=5)
+tscv = TimeSeriesSplit(n_splits=3)
 
 class Net(torch.nn.Module):
     def __init__(self, num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate):
@@ -140,29 +142,24 @@ def data_to_graph(df, window, train_indices, val_indices):
     return data
 
 def objective(trial):
-    global best_trial_params	
-    global best_mae
-    dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5)
+    dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.5)
     lr = trial.suggest_float("lr", 1e-4, 1e-1,log=True)
-    # num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [32, 64, 96, 128, 256])
-    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [64])
-    # num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21, 24])
-    num_layers = trial.suggest_categorical("num_layers", [9])
+    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [16, 32, 64, 96, 128, 256])
+    num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21])
     weight_decay = trial.suggest_float("weight_decay", 1e-10, 1e-3)  # L2 regularization
     results = []
-    true_values = []	
+    true_values = []
     predictions = []
 
     for fold, (train_index, val_index) in enumerate(tscv.split(np.arange(window, df.shape[0] - window))):
-        trial.set_user_attr("train_index", train_index.tolist())	
-        trial.set_user_attr("val_index", val_index.tolist())
+        # trial.set_user_attr("train_index", train_index.tolist())	
+        # trial.set_user_attr("val_index", val_index.tolist())
         data = data_to_graph(df, window, train_index, val_index)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        num_original_features = window  # original size
-        num_additional_features = 3  # new additional features
         model = Net(num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate).to(device)
         data = data.to(device)
         optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Added weight decay for L2 regularization
+        # optimizer = RMSprop(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=patience_learning_scheduler)  # Added a learning rate scheduler
         criterion = L1Loss()
         model.train()
@@ -181,8 +178,8 @@ def objective(trial):
                 pred = model(data)
                 val_loss = criterion(out[data.val_mask], data.y[data.val_mask])
                 val_losses.append(val_loss.item())
-                true_values.append(data.y[data.val_mask].cpu().detach().numpy().tolist())	
-                predictions.append(pred[data.val_mask].cpu().detach().numpy().tolist())
+                true_values = data.y[data.val_mask].cpu().detach().numpy().tolist()
+                predictions = pred[data.val_mask].cpu().detach().numpy().tolist()
 
             scheduler.step(val_loss)
 
@@ -237,7 +234,7 @@ def objective(trial):
 
 # Start Optuna study
 pruner = SuccessiveHalvingPruner()
-study = optuna.create_study(study_name="gcn_9layers_64channels", storage=database_url, load_if_exists=True, direction="minimize", pruner=pruner)
+study = optuna.create_study(study_name="gcn_adam", storage=database_url, load_if_exists=True, direction="minimize", pruner=pruner)
 study.optimize(objective, n_trials=n_trails, n_jobs=n_jobs, show_progress_bar=True)
 vis.plot_optimization_history(study)
 vis.plot_intermediate_values(study)
@@ -251,13 +248,14 @@ vis.plot_contour(study)
 best_trial = study.best_trial	
 best_true_values = best_trial.user_attrs["true_values"]	
 best_predictions = best_trial.user_attrs["predictions"]	
-# Convert to NumPy arrays for easier manipulation	
+# Convert to NumPy arrays for easier manipulation
 best_true_values = np.array([item for sublist in best_true_values for item in sublist])	
 best_predictions = np.array([item for sublist in best_predictions for item in sublist])	
+
 # Now, true_values and predictions contain data only for the best model's last run, so they are the same size and can be plotted against df['collect_date']	
 plt.plot(df['collect_date'][:len(best_true_values)], best_true_values, label='True values')	
 plt.plot(df['collect_date'][:len(best_predictions)], best_predictions, label='Predictions')	
 plt.xlabel('Time')	
-plt.ylabel('Confirmed Cases')	
+plt.ylabel('Confirmed Cases')
 plt.legend()	
 plt.show()

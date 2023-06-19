@@ -24,7 +24,8 @@ from optuna.pruners import SuccessiveHalvingPruner
 from sqlalchemy import create_engine
 
 engine = create_engine('postgresql://rcvb:@localhost:5432/gnns_db')
-database_url = 'postgresql://rcvb:@localhost:5432/gnns_db'
+# database_url = 'postgresql://rcvb:@localhost:5432/gnns_db'
+database_url = 'sqlite:///gcn'
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -56,7 +57,7 @@ window = 15
 total_epochs = 100
 trials_until_start_pruning = 150
 n_trails = 10
-n_jobs = 2 # Number of parallel jobs
+n_jobs = 1 # Number of parallel jobs
 num_original_features = window  # original size
 num_additional_features = 3  # new additional features
 patience_learning_scheduler = 15
@@ -251,10 +252,10 @@ best_predictions = best_trial.user_attrs["predictions"]
 best_true_values = np.array([item for sublist in best_true_values for item in sublist])
 best_predictions = np.array([item for sublist in best_predictions for item in sublist])
 
-# Now, true_values and predictions contain data only for the best model's last run, so they are the same size and can be plotted against df['collect_date']
+""" # Now, true_values and predictions contain data only for the best model's last run, so they are the same size and can be plotted against df['collect_date']
 plt.plot(df['collect_date'][:len(best_true_values)], best_true_values, label='True values')
 plt.plot(df['collect_date'][:len(best_predictions)], best_predictions, label='Predictions')
 plt.xlabel('Time')
 plt.ylabel('Confirmed Cases')
 plt.legend()
-plt.show()
+plt.show() """

@@ -1,19 +1,12 @@
 from asyncio import constants
 from datetime import date, timedelta
 import time
-import warnings
-from sklearn.calibration import cross_val_predict
-
-import tensorflow as tf
 from utils import Utils
 import constants
 import json
 import pandas as pd
 from pandas_profiling import ProfileReport
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from sklearn.model_selection import GridSearchCV, train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 from tensorflow import keras
 from tensorflow.keras import layers
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -21,10 +14,11 @@ import numpy as np
 
 start_time = time.time()
 # decide which path to follow
-run_load = False
-run_from_file = False
-mount_whole_csv_encoded = False
-run_from_file_improved = True
+# you can skip the first part if you already have the confirmed_cases_by_region_and_date.json file and run_from_file_improved = True
+run_load = False # if True, will load the csv file and create the json file
+run_from_file = False # if True, will load the json file and run the model
+mount_whole_csv_encoded = False # if True, will mount the whole csv encoded
+run_from_file_improved = True # if True, will load the json file and run the model
 home = '/Users/rcvb/Documents/tcc_rian/code'
 
 if run_load:
@@ -146,9 +140,6 @@ elif run_from_file_improved:
     from tensorflow import keras
     from tensorflow.keras import layers
     import numpy as np
-    from sklearn.model_selection import cross_val_score
-    from sklearn.model_selection import KFold
-    from tensorflow.keras.wrappers.scikit_learn import KerasRegressor
     from sklearn.model_selection import train_test_split
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.metrics import mean_absolute_error, r2_score, mean_absolute_percentage_error, mean_squared_error
