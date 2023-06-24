@@ -55,7 +55,7 @@ class Utils:
     def get_neighbors_of_region(regional):
         return constants.REGIONS_AND_NEIGHBORS_DICT[regional]
     
-     # get populations from assets/populacao_residente_sc_por_macroregiao.csv, normalize and add to graphs
+    # get populations from assets/populacao_residente_sc_por_macroregiao.csv, normalize and add to graphs
     def get_population_from_csv():
         population = pd.read_csv('/Users/rcvb/Documents/tcc_rian/code/assets/populacao_residente_sc_por_macroregiao.csv', sep=';')
         population = population.set_index('region')
