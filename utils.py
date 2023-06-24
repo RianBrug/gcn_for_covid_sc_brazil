@@ -3,6 +3,7 @@ from numpy import argmax, ndarray
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import constants
 import numpy as np
+import pandas as pd
 
 class Utils:
 
@@ -53,6 +54,18 @@ class Utils:
 
     def get_neighbors_of_region(regional):
         return constants.REGIONS_AND_NEIGHBORS_DICT[regional]
+    
+    # get populations from assets/populacao_residente_sc_por_macroregiao.csv, normalize and add to graphs
+    def get_population_from_csv():
+        population = pd.read_csv('/Users/rcvb/Documents/tcc_rian/code/assets/populacao_residente_sc_por_macroregiao.csv', sep=';')
+        population = population.set_index('region')
+        population = population.to_dict()['population']
+        # normalize population
+        max_population = max(population.values())
+        for key in population:
+            population[key] = population[key] / max_population
+        
+        return population
     
     # implement get_target_cases
     def get_target_cases(data, regional, date):

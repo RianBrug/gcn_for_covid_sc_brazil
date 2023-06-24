@@ -1,5 +1,6 @@
 import json
 import sklearn
+from sklearn import datasets
 import torch
 import networkx as nx
 import pandas as pd
@@ -10,6 +11,7 @@ from torch_geometric.nn import GCNConv
 from torch.nn import L1Loss, MSELoss
 import torch.nn.functional as F
 from torch.optim import Adam, RMSprop
+import torch.nn as nn
 
 from utils import Utils
 import numpy as np
@@ -26,7 +28,6 @@ from sqlalchemy import create_engine
 
 # engine = create_engine('postgresql://rcvb:@localhost:5432/gnns_db')
 # database_url = 'postgresql://rcvb:@localhost:5432/gnns_db'
-database_url = 'sqlite:///gcn_latest'
 
 print("------- VERSIONS -------")
 print("SQLite version: ", sqlite3.version)
@@ -52,12 +53,15 @@ df.reset_index(inplace=True)
 df.rename(columns={'index':'collect_date'}, inplace=True)
 df['collect_date'] = pd.to_datetime(df['collect_date'])
 df.sort_values(by=['collect_date'], inplace=True)
-df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
+# df.drop(df.columns[len(df.columns)-1], axis=1, inplace=True)
+df.fillna(0, inplace=True)
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+database_url = 'sqlite:///gcn_latest'
 window = 15
-total_epochs = 160
+total_epochs = 150
 trials_until_start_pruning = 150
-n_trails = 5000
+n_trails = 10
 n_jobs = 5 # Number of parallel jobs
 num_original_features = window  # original size
 num_additional_features = 3  # new additional features
@@ -67,24 +71,48 @@ predictions = []
 
 tscv = TimeSeriesSplit(n_splits=3)
 
-class Net(torch.nn.Module):
-    def __init__(self, num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate):
-        super(Net, self).__init__()
-        self.layers = torch.nn.ModuleList()
-        self.layers.append(GCNConv(num_original_features + num_additional_features, num_hidden_channels))
-        for _ in range(num_layers - 2): # -2 to account for the first and last layers
-            self.layers.append(GCNConv(num_hidden_channels, num_hidden_channels))
-        self.layers.append(GCNConv(num_hidden_channels, num_original_features))  # output size matches num_original_features
-        self.dropout_rate = dropout_rate
+class GCN(torch.nn.Module):
+    def __init__(self, hidden_channels):
+        super(GCN, self).__init__()
+        torch.manual_seed(12345)
+        self.conv1 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv3 = GCNConv(hidden_channels, 1)
+        self.transformer_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=hidden_channels, nhead=8),
+            num_layers=3
+        )
+        
+        # Define positional embeddings
+        self.position_embedding = nn.Embedding(10000, 18)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
-        for conv in self.layers[:-1]:
-            x = conv(x, edge_index)
-            x = F.relu(x)
-            x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        x = self.layers[-1](x, edge_index)  # Don't apply relu or dropout to the last layer's outputs
+
+        # Add positional embeddings to input
+        # positions = torch.arange(0, x.size(1)).expand(x.size(0), -1).to(x.device)
+        positions = torch.arange(x.size(1)).unsqueeze(0).repeat(x.size(0), 1).to(x.device)
+        x = x + self.position_embedding(positions)
+
+        # Apply transformer to sequence of feature vectors for each node
+        x = self.transformer_encoder(x)
+
+        # Use all feature vectors of the sequence as input to the graph convolutional layers
+        x = x.view(-1, x.size(-1))
+
+        x = self.conv1(x, edge_index)
+        x = x.relu()
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv2(x, edge_index)
+        x = x.relu()
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.conv3(x, edge_index)
+
         return x
+    
+    def compute_loss(self, pred, data):
+        # Use Mean Absolute Error (MAE) as the loss
+        return F.l1_loss(pred, data.y.view(-1))
 
 def sliding_windows(data, window):
         X = []
@@ -101,15 +129,15 @@ def data_to_graph(df, window, train_indices, val_indices):
     train_mask = []
     val_mask = []
 
-    # Load your additional features data here. For example:
+    # Load your additional features data here
     pr_df = pd.read_csv(f'{home}/assets/populacao_residente_sc_por_macroregiao.csv', sep=";", index_col=0)
     rf_df = pd.read_csv(f'{home}/assets/recursos_fisicos_hospitalares_leitos_de_internação_por_macro_out22.csv', sep=";", index_col=0)
     aa_df = pd.read_csv(f'{home}/assets/abastecimento_agua_por_populacao.csv', sep=";", index_col=0)
 
     for region in df.columns[1:]:
-        region_df = df[['collect_date', region]].dropna()
+        region_df = df[['collect_date', region]].fillna(0)
         X, Y = sliding_windows(region_df[region], window)
-        
+
         # Retrieve additional features for the current region
         add_features = np.array([
             pr_df.loc[region],
@@ -117,23 +145,32 @@ def data_to_graph(df, window, train_indices, val_indices):
             aa_df.loc[region]
         ]).flatten()
 
+        # Create the node for the region and add the feature vectors and labels for each time window
+        features = []
+        labels = []
         for i in range(len(X)):
             # Concatenate original features with additional features
-            features = np.concatenate([X[i], add_features]).astype(np.float32)
-            G.add_node((region, i), x=torch.tensor(features), y=torch.tensor(Y[i]).float())
-            for neighbor in Utils.get_neighbors_of_region(region):
-                if (neighbor, i) in G.nodes:
-                    G.add_edge((region, i), (neighbor, i))
+            current_features = np.concatenate([X[i], add_features]).astype(np.float32)
+            features.append(current_features)
+            labels.append(Y[i])
+        
+        G.add_node(region, x=torch.stack([torch.tensor(f) for f in features]), y=torch.tensor(labels).float())
 
-            if i in train_indices:
-                train_mask.append(True)
-            else:
-                train_mask.append(False)
-
-            if i in val_indices:
-                val_mask.append(True)
-            else:
-                val_mask.append(False)
+        # Add edges to neighboring regions
+        for neighbor in Utils.get_neighbors_of_region(region):
+            if neighbor in G.nodes:
+                G.add_edge(region, neighbor)
+        
+        # Masking for train and validation datasets
+        # Now each region is a single node, so we can use the train_indices and val_indices directly
+        if region in train_indices:
+            train_mask.append(True)
+        else:
+            train_mask.append(False)
+        if region in val_indices:
+            val_mask.append(True)
+        else:
+            val_mask.append(False)
 
     data = from_networkx(G)
     data.train_mask = torch.tensor(train_mask)
@@ -141,121 +178,49 @@ def data_to_graph(df, window, train_indices, val_indices):
 
     return data
 
+
+def train(model, data, train_mask, optimizer):
+    model.train()
+    optimizer.zero_grad()
+    pred = model(data)[train_mask]
+    loss = model.objective(pred, data)
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+def test(model, data, test_mask):
+    model.eval()
+    with torch.no_grad():
+        pred = model(data)[test_mask]
+    return pred, data.y[test_mask]
+
 def objective(trial):
-    dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.5)
-    lr = trial.suggest_float("lr", 1e-4, 1e-1,log=True)
-    num_hidden_channels = trial.suggest_categorical("num_hidden_channels", [16, 32, 64, 96, 128, 256])
-    num_layers = trial.suggest_categorical("num_layers", [6, 9, 12, 15, 18, 21])
-    weight_decay = trial.suggest_float("weight_decay", 1e-10, 1e-3)  # L2 regularization
-    results = []
-    true_values = []
-    predictions = []
+    lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
+    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 64, 128])
+    dropout = trial.suggest_float('dropout', 0.1, 0.7)
+    model = GCN(hidden_channels=hidden_channels)
+    optimizer = Adam(model.parameters(), lr=lr)
 
-    for fold, (train_index, val_index) in enumerate(tscv.split(np.arange(window, df.shape[0] - window))):
-        # trial.set_user_attr("train_index", train_index.tolist())	
-        # trial.set_user_attr("val_index", val_index.tolist())
-        data = data_to_graph(df, window, train_index, val_index)
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = Net(num_original_features, num_additional_features, num_hidden_channels, num_layers, dropout_rate).to(device)
-        data = data.to(device)
-        optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Added weight decay for L2 regularization
-        # optimizer = RMSprop(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=patience_learning_scheduler)  # Added a learning rate scheduler
-        criterion = L1Loss()
-        model.train()
-        fold_losses = []  # Average loss for each epoch within this fold	
-        val_losses = []  # Validation loss for each epoch within this fold
-        for epoch in range(total_epochs):
-            optimizer.zero_grad()
-            out = model(data)
-            loss = criterion(out[data.train_mask], data.y[data.train_mask])
-            loss.backward()
-            optimizer.step()
-            model.eval()
-            fold_losses.append(loss.item())
+    for i in range(total_epochs):
+        for train_indices, val_indices in tscv.split(df):
+            data = data_to_graph(df, window, train_indices, val_indices)
 
-            with torch.no_grad():
-                pred = model(data)
-                val_loss = criterion(out[data.val_mask], data.y[data.val_mask])
-                val_losses.append(val_loss.item())
-                true_values = data.y[data.val_mask].cpu().detach().numpy().tolist()
-                predictions = pred[data.val_mask].cpu().detach().numpy().tolist()
+            loss = train(model, data, data.train_mask, optimizer)
+            trial.report(loss, i)
 
-            scheduler.step(val_loss)
-
-        avg_fold_loss = sum(fold_losses) / len(fold_losses)
-
-        if trial.number > trials_until_start_pruning:
-            # Pass the average fold loss to the pruner
-            unique_epoch = fold * total_epochs + epoch
-            trial.report(avg_fold_loss, unique_epoch)
-
-            # Handle pruning based on the intermediate value
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
-        
-        if np.isnan(data.y[data.val_mask].cpu().detach().numpy()).any():
-            print("NaN value detected in target data.")
-            return np.inf  # Optuna will minimize this value
-        
-        # Check for NaN values in prediction
-        if np.isnan(pred[data.val_mask].cpu().detach().numpy()).any():
-            print("NaN value detected in prediction.")
-            return np.inf  # Optuna will minimize this value
 
-        mae = mean_absolute_error(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
-        mape = mean_absolute_percentage_error(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
-        mse = mean_squared_error(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
-        rmse = np.sqrt(mse)
-        r2 = r2_score(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
-        mdape = Utils.MDAPE(data.y[data.val_mask].cpu().detach().numpy(), pred[data.val_mask].cpu().detach().numpy())
+    # Validate model
+    for train_indices, val_indices in tscv.split(df):
+        data = data_to_graph(df, window, train_indices, val_indices)
 
-        results.append((mae, mape, mse, rmse, r2, mdape, val_losses[-33:]))
+        pred, y = test(model, data, data.val_mask)
+        score = mean_absolute_error(pred.cpu(), y.cpu())
+        trial.report(score, total_epochs)
 
-    avg_mae = np.mean([res[0] for res in results])
-    avg_mape = np.mean([res[1] for res in results])
-    avg_mse = np.mean([res[2] for res in results])
-    avg_rmse = np.mean([res[3] for res in results])
-    avg_r2 = np.mean([res[4] for res in results])
-    avg_mdape = np.mean([res[5] for res in results])
-    avg_val_losses = np.mean([res[6] for res in results])
+    return score
 
-    trial.set_user_attr("avg_mae", float(avg_mae))
-    trial.set_user_attr("avg_mape", float(avg_mape))
-    trial.set_user_attr("avg_mse", float(avg_mse))
-    trial.set_user_attr("avg_rmse", float(avg_rmse))
-    trial.set_user_attr("avg_r2", float(avg_r2))
-    trial.set_user_attr("avg_mdape", float(avg_mdape))
-    trial.set_user_attr("avg_val_losses", float(avg_val_losses))
-    trial.set_user_attr("true_values", true_values)
-    trial.set_user_attr("predictions", predictions)
-
-    return avg_mae  # Optuna will minimize this value
-
-# Start Optuna study
-pruner = SuccessiveHalvingPruner()
-study = optuna.create_study(study_name="gcn_adam", storage=database_url, load_if_exists=True, direction="minimize", pruner=pruner)
-study.optimize(objective, n_trials=n_trails, n_jobs=n_jobs, show_progress_bar=True)
-vis.plot_optimization_history(study)
-vis.plot_intermediate_values(study)
-vis.plot_parallel_coordinate(study)
-vis.plot_slice(study)
-vis.plot_param_importances(study)
-vis.plot_edf(study)
-vis.plot_contour(study)
-
-# After the study	
-best_trial = study.best_trial	
-best_true_values = best_trial.user_attrs["true_values"]	
-best_predictions = best_trial.user_attrs["predictions"]	
-# Convert to NumPy arrays for easier manipulation
-best_true_values = np.array([item for sublist in best_true_values for item in sublist])	
-best_predictions = np.array([item for sublist in best_predictions for item in sublist])	
-
-# Now, true_values and predictions contain data only for the best model's last run, so they are the same size and can be plotted against df['collect_date']	
-plt.plot(df['collect_date'][:len(best_true_values)], best_true_values, label='True values')	
-plt.plot(df['collect_date'][:len(best_predictions)], best_predictions, label='Predictions')	
-plt.xlabel('Time')	
-plt.ylabel('Confirmed Cases')
-plt.legend()	
-plt.show()
+study = optuna.create_study(direction="minimize", pruner=SuccessiveHalvingPruner(min_resource=1, reduction_factor=4, min_early_stopping_rate=0))
+study.optimize(objective, n_trials=n_trails, timeout=600, n_jobs=n_jobs)
+print(study.best_trial)
