@@ -75,4 +75,5 @@ Please note that the Optuna Dashboard is read-only and does not support modifyin
 Contributions to the project are always welcome. Feel free to submit bug reports, feature requests, or pull requests.
 
 ## License
-This project is licensed under Open Access Licenses.
+https://creativecommons.org/licenses/by-nc/3.0/br/deed.en
+This project is licensed under CC BY-NC 3.0
